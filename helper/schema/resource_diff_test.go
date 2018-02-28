@@ -20,16 +20,17 @@ func testSetFunc(v interface{}) int {
 
 // resourceDiffTestCase provides a test case struct for SetNew and SetDiff.
 type resourceDiffTestCase struct {
-	Name          string
-	Schema        map[string]*Schema
-	State         *terraform.InstanceState
-	Config        *terraform.ResourceConfig
-	Diff          *terraform.InstanceDiff
-	Key           string
-	OldValue      interface{}
-	NewValue      interface{}
-	Expected      *terraform.InstanceDiff
-	ExpectedError bool
+	Name               string
+	Schema             map[string]*Schema
+	State              *terraform.InstanceState
+	Config             *terraform.ResourceConfig
+	Diff               *terraform.InstanceDiff
+	Key                string
+	OldValue           interface{}
+	NewValue           interface{}
+	Expected           *terraform.InstanceDiff
+	ExpectedAttributes map[string]*terraform.ResourceAttrDiff
+	ExpectedError      bool
 }
 
 // testDiffCases produces a list of test cases for use with SetNew and SetDiff.
@@ -697,6 +698,69 @@ func TestForceNew(t *testing.T) {
 				},
 			},
 		},
+		resourceDiffTestCase{
+			Name: "nested field",
+			Schema: map[string]*Schema{
+				"foo": &Schema{
+					Type:     TypeList,
+					Required: true,
+					MaxItems: 1,
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"bar": {
+								Type:     TypeString,
+								Optional: true,
+							},
+							"baz": {
+								Type:     TypeString,
+								Optional: true,
+							},
+						},
+					},
+				},
+			},
+			State: &terraform.InstanceState{
+				Attributes: map[string]string{
+					"foo.#":     "1",
+					"foo.0.bar": "abc",
+					"foo.0.baz": "xyz",
+				},
+			},
+			Config: testConfig(t, map[string]interface{}{
+				"foo": []map[string]interface{}{
+					map[string]interface{}{
+						"bar": "abcdefg",
+						"baz": "changed",
+					},
+				},
+			}),
+			Diff: &terraform.InstanceDiff{
+				Attributes: map[string]*terraform.ResourceAttrDiff{
+					"foo.0.bar": &terraform.ResourceAttrDiff{
+						Old: "abc",
+						New: "abcdefg",
+					},
+					"foo.0.baz": &terraform.ResourceAttrDiff{
+						Old: "xyz",
+						New: "changed",
+					},
+				},
+			},
+			Key: "foo.0.baz",
+			Expected: &terraform.InstanceDiff{
+				Attributes: map[string]*terraform.ResourceAttrDiff{
+					"foo.0.bar": &terraform.ResourceAttrDiff{
+						Old: "abc",
+						New: "abcdefg",
+					},
+					"foo.0.baz": &terraform.ResourceAttrDiff{
+						Old:         "xyz",
+						New:         "changed",
+						RequiresNew: true,
+					},
+				},
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
@@ -847,6 +911,130 @@ func TestClear(t *testing.T) {
 			}
 			if !reflect.DeepEqual(tc.Expected, tc.Diff) {
 				t.Fatalf("Expected %s, got %s", spew.Sdump(tc.Expected), spew.Sdump(tc.Diff))
+			}
+		})
+	}
+}
+
+func TestGetDiffAttributes(t *testing.T) {
+	cases := []resourceDiffTestCase{
+		resourceDiffTestCase{
+			Name: "basic primitive diff",
+			Schema: map[string]*Schema{
+				"foo": &Schema{
+					Type:     TypeString,
+					Optional: true,
+					Computed: true,
+				},
+			},
+			State: &terraform.InstanceState{
+				Attributes: map[string]string{
+					"foo": "bar",
+				},
+			},
+			Config: testConfig(t, map[string]interface{}{
+				"foo": "baz",
+			}),
+			Diff: &terraform.InstanceDiff{
+				Attributes: map[string]*terraform.ResourceAttrDiff{
+					"foo": &terraform.ResourceAttrDiff{
+						Old: "bar",
+						New: "baz",
+					},
+				},
+			},
+			Key: "foo",
+			ExpectedAttributes: map[string]*terraform.ResourceAttrDiff{
+				"foo": &terraform.ResourceAttrDiff{
+					Old: "bar",
+					New: "baz",
+				},
+			},
+		},
+		resourceDiffTestCase{
+			Name: "nested field filtering",
+			Schema: map[string]*Schema{
+				"testfield": &Schema{
+					Type:     TypeString,
+					Required: true,
+				},
+				"foo": &Schema{
+					Type:     TypeList,
+					Required: true,
+					MaxItems: 1,
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"bar": {
+								Type:     TypeString,
+								Optional: true,
+							},
+							"baz": {
+								Type:     TypeString,
+								Optional: true,
+							},
+						},
+					},
+				},
+			},
+			State: &terraform.InstanceState{
+				Attributes: map[string]string{
+					"testfield": "blablah",
+					"foo.#":     "1",
+					"foo.0.bar": "abc",
+					"foo.0.baz": "xyz",
+				},
+			},
+			Config: testConfig(t, map[string]interface{}{
+				"testfield": "modified",
+				"foo": []map[string]interface{}{
+					map[string]interface{}{
+						"bar": "abcdefg",
+						"baz": "changed",
+					},
+				},
+			}),
+			Diff: &terraform.InstanceDiff{
+				Attributes: map[string]*terraform.ResourceAttrDiff{
+					"testfield": &terraform.ResourceAttrDiff{
+						Old: "blablah",
+						New: "modified",
+					},
+					"foo.0.bar": &terraform.ResourceAttrDiff{
+						Old: "abc",
+						New: "abcdefg",
+					},
+					"foo.0.baz": &terraform.ResourceAttrDiff{
+						Old: "xyz",
+						New: "changed",
+					},
+				},
+			},
+			Key: "foo",
+			ExpectedAttributes: map[string]*terraform.ResourceAttrDiff{
+				"foo.0.bar": &terraform.ResourceAttrDiff{
+					Old: "abc",
+					New: "abcdefg",
+				},
+				"foo.0.baz": &terraform.ResourceAttrDiff{
+					Old: "xyz",
+					New: "changed",
+				},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			m := schemaMap(tc.Schema)
+			d := newResourceDiff(m, tc.Config, tc.State, tc.Diff)
+			attributes := d.GetDiffAttributes(tc.Key)
+
+			for _, k := range d.UpdatedKeys() {
+				if err := m.diff(k, m[k], tc.Diff, d, false); err != nil {
+					t.Fatalf("bad: %s", err)
+				}
+			}
+			if !reflect.DeepEqual(tc.ExpectedAttributes, attributes) {
+				t.Fatalf("Expected %s, got %s", spew.Sdump(tc.ExpectedAttributes), spew.Sdump(attributes))
 			}
 		})
 	}
